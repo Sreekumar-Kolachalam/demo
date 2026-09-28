@@ -1,0 +1,1106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Adaptive LiDAR — 2.5D Grid Overlay on 3D Chase-Cam Drive</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  :root {
+    --panel-bg: rgba(255,255,255,0.93);
+    --panel-border: rgba(20,22,26,0.10);
+    --text-main: #1a1d21;
+    --text-sub: #6b7278;
+  }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #d7dadd;
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  canvas { display: block; }
+
+  #hud {
+    position: fixed; top: 20px; left: 20px;
+    display: flex; flex-direction: column; gap: 10px;
+    pointer-events: none; user-select: none; z-index: 5;
+  }
+  .panel {
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    padding: 10px 16px;
+  }
+  #speedPanel { display: flex; align-items: baseline; gap: 6px; }
+  #speedValue {
+    font-size: 34px; font-weight: 600; color: var(--text-main);
+    letter-spacing: -0.5px; font-variant-numeric: tabular-nums; min-width: 60px;
+  }
+  #speedUnit { font-size: 13px; color: var(--text-sub); font-weight: 500; }
+  #statsPanel { font-size: 12px; color: var(--text-sub); line-height: 1.7; }
+  #statsPanel b { color: var(--text-main); font-weight: 600; }
+  #statsPanel .row { display: flex; justify-content: space-between; gap: 20px; }
+
+  #modePanel {
+    position: fixed; top: 20px; right: 20px;
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--text-sub); font-weight: 500;
+    z-index: 5;
+  }
+  #modePanel .dot { width: 7px; height: 7px; border-radius: 50%; background: #4f9d63; flex: none; }
+
+  #caption {
+    position: fixed; bottom: 16px; right: 20px;
+    font-size: 10.5px; color: rgba(30,32,35,0.38);
+    pointer-events: none; z-index: 5;
+  }
+
+  #cellDataPanel {
+    position: fixed; bottom: 16px; left: 20px;
+    display: flex; flex-direction: column; gap: 6px;
+    align-items: flex-start;
+    z-index: 6;
+  }
+  #cellDataPanel button {
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-sub);
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 7px 12px;
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+  #cellDataPanel button:hover { color: var(--text-main); }
+  #cellDataToggle.active { color: #fff; background: #3d4550; border-color: #3d4550; }
+  #cellDataModes { display: none; gap: 4px; }
+  #cellDataModes button { padding: 5px 9px; font-size: 10.5px; }
+  #cellDataModes button.active { color: #fff; background: #4f7cac; border-color: #4f7cac; }
+
+  #cellDataLabels { position: fixed; inset: 0; pointer-events: none; z-index: 3; }
+  .cell-data-label {
+    position: absolute;
+    display: none;
+    transform: translate(-50%, -50%);
+    background: rgba(10,14,18,0.55);
+    color: #eef2f5;
+    font-family: "Consolas", "SF Mono", Menlo, monospace;
+    font-size: 9px;
+    line-height: 1.25;
+    padding: 1px 3px;
+    border-radius: 2px;
+    white-space: nowrap;
+    text-align: center;
+  }
+
+  #labels { position: fixed; inset: 0; pointer-events: none; z-index: 4; }
+  .obj-label {
+    position: absolute;
+    transform: translate(-50%, -100%);
+    background: rgba(255,255,255,0.94);
+    border: 1px solid rgba(20,22,26,0.12);
+    border-radius: 4px;
+    padding: 3px 8px 3px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #1a1d21;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.16);
+  }
+  .obj-label .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+</style>
+</head>
+<body>
+<div id="labels"></div>
+<div id="cellDataLabels"></div>
+
+<div id="cellDataPanel">
+  <div id="cellDataModes">
+    <button data-mode="xy">X,Y only</button>
+    <button data-mode="z">Z only</button>
+    <button data-mode="xyz" class="active">X,Y,Z (both)</button>
+  </div>
+  <button id="cellDataToggle">Cell Data</button>
+</div>
+
+<div id="hud">
+  <div id="speedPanel" class="panel">
+    <span id="speedValue">0</span><span id="speedUnit">km/h</span>
+  </div>
+  <div id="statsPanel" class="panel">
+    <div class="row"><span>Grid resolution</span><b id="gridRes">5cm&ndash;50cm adaptive</b></div>
+    <div class="row"><span>Objects tracked</span><b id="objCount">0</b></div>
+  </div>
+</div>
+<div id="modePanel" class="panel"><span class="dot" id="statusDot"></span><span id="statusText">Autopilot &mdash; Cruising</span></div>
+<div id="caption">Adaptive Variable-Resolution LiDAR &mdash; 2.5D grid overlay</div>
+
+<script>
+(function () {
+"use strict";
+
+// ===================================================================
+// Renderer / scene / camera
+// ===================================================================
+const BG_COLOR = 0xd7dadd;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(BG_COLOR);
+scene.fog = new THREE.Fog(BG_COLOR, 45, 150);
+
+const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 500);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputEncoding = THREE.sRGBEncoding;
+document.body.appendChild(renderer.domElement);
+
+let W = window.innerWidth, H = window.innerHeight;
+window.addEventListener('resize', () => {
+  W = window.innerWidth; H = window.innerHeight;
+  camera.aspect = W / H;
+  camera.updateProjectionMatrix();
+  renderer.setSize(W, H);
+});
+
+const UP = new THREE.Vector3(0, 1, 0);
+
+// ===================================================================
+// Lighting
+// ===================================================================
+scene.add(new THREE.HemisphereLight(0xffffff, 0xb8bcc0, 0.75));
+const sun = new THREE.DirectionalLight(0xffffff, 0.95);
+sun.position.set(60, 90, 40);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -130; sun.shadow.camera.right = 130;
+sun.shadow.camera.top = 130; sun.shadow.camera.bottom = -130;
+sun.shadow.camera.near = 10; sun.shadow.camera.far = 260;
+sun.shadow.bias = -0.0015;
+scene.add(sun);
+
+// ===================================================================
+// Ground plane
+// ===================================================================
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(1200, 1200),
+  new THREE.MeshStandardMaterial({ color: 0xcfd3d6, roughness: 1, metalness: 0 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.02;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// ===================================================================
+// Road path (closed Catmull-Rom loop) — 2 lanes, ego drives the left one
+// ===================================================================
+const roadPoints = [
+  new THREE.Vector3(0, 0, 0), new THREE.Vector3(26, 0, -16), new THREE.Vector3(56, 3.5, -46),
+  new THREE.Vector3(96, 0, -56), new THREE.Vector3(132, 0, -30), new THREE.Vector3(136, 0, 16),
+  new THREE.Vector3(100, 0, 46), new THREE.Vector3(54, 0, 56), new THREE.Vector3(8, 0, 40),
+  new THREE.Vector3(-26, 0, 10)
+];
+const roadCurve = new THREE.CatmullRomCurve3(roadPoints, true, 'catmullrom', 0.45);
+const LANE_WIDTH = 3.6;
+const ROAD_WIDTH = LANE_WIDTH * 2;
+const LEFT_LANE_X = -LANE_WIDTH / 2;
+const RIGHT_LANE_X = LANE_WIDTH / 2;
+const LANE_HALF_WIDTH = LANE_WIDTH / 2;
+const ROAD_SEGMENTS = 260;
+const totalLength = roadCurve.getLength();
+
+function sampleRoad(curve, segments) {
+  const pts = [], tans = [];
+  for (let i = 0; i < segments; i++) { const t = i / segments; pts.push(curve.getPointAt(t)); tans.push(curve.getTangentAt(t)); }
+  return { pts, tans };
+}
+const roadSample = sampleRoad(roadCurve, ROAD_SEGMENTS);
+
+function buildRibbon(pts, tans, widthFn, yOffset, closed) {
+  const positions = [], indices = [];
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const w = widthFn(i / n) / 2;
+    const side = new THREE.Vector3().crossVectors(UP, tans[i]).normalize().multiplyScalar(w);
+    const c = pts[i];
+    positions.push(c.x + side.x, c.y + yOffset, c.z + side.z);
+    positions.push(c.x - side.x, c.y + yOffset, c.z - side.z);
+  }
+  const count = closed ? n : n - 1;
+  for (let i = 0; i < count; i++) {
+    const a = (i * 2) % (n * 2), b = (i * 2 + 1) % (n * 2);
+    const c2 = ((i + 1) * 2) % (n * 2), d = ((i + 1) * 2 + 1) % (n * 2);
+    indices.push(a, c2, b, b, c2, d);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+const roadMesh = new THREE.Mesh(
+  buildRibbon(roadSample.pts, roadSample.tans, () => ROAD_WIDTH, 0.0, true),
+  new THREE.MeshStandardMaterial({ color: 0x4d5257, roughness: 0.95, metalness: 0.02, side: THREE.DoubleSide })
+);
+roadMesh.receiveShadow = true;
+scene.add(roadMesh);
+
+const edgeMatWhite = new THREE.MeshBasicMaterial({ color: 0xe9ebe9, side: THREE.DoubleSide });
+const edgeInset = ROAD_WIDTH / 2 - 0.26;
+function offsetPts(pts, tans, dist) {
+  return pts.map((p, i) => {
+    const side = new THREE.Vector3().crossVectors(UP, tans[i]).normalize().multiplyScalar(dist);
+    return new THREE.Vector3(p.x + side.x, p.y, p.z + side.z);
+  });
+}
+const leftEdgePts = offsetPts(roadSample.pts, roadSample.tans, edgeInset);
+const rightEdgePts = offsetPts(roadSample.pts, roadSample.tans, -edgeInset);
+scene.add(new THREE.Mesh(buildRibbon(leftEdgePts, roadSample.tans, () => 0.16, 0.012, true), edgeMatWhite));
+scene.add(new THREE.Mesh(buildRibbon(rightEdgePts, roadSample.tans, () => 0.16, 0.012, true), edgeMatWhite));
+
+function buildDashedCenter(curve, dashLen, gapLen, width, yOffset) {
+  const positions = [], indices = [];
+  let idx = 0;
+  const step = dashLen + gapLen;
+  const nDashes = Math.floor(totalLength / step);
+  for (let i = 0; i < nDashes; i++) {
+    const s0 = i * step;
+    const t0 = (s0 / totalLength) % 1;
+    const t1 = ((s0 + dashLen) / totalLength) % 1;
+    const p0 = curve.getPointAt(t0), p1 = curve.getPointAt(t1);
+    const tan = curve.getTangentAt(t0);
+    const side = new THREE.Vector3().crossVectors(UP, tan).normalize().multiplyScalar(width / 2);
+    const a = new THREE.Vector3().addVectors(p0, side), b = new THREE.Vector3().subVectors(p0, side);
+    const c = new THREE.Vector3().addVectors(p1, side), d = new THREE.Vector3().subVectors(p1, side);
+    positions.push(a.x, a.y + yOffset, a.z, b.x, b.y + yOffset, b.z, c.x, c.y + yOffset, c.z, d.x, d.y + yOffset, d.z);
+    indices.push(idx, idx + 2, idx + 1, idx + 1, idx + 2, idx + 3);
+    idx += 4;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  return geo;
+}
+scene.add(new THREE.Mesh(
+  buildDashedCenter(roadCurve, 1.1, 1.3, 0.16, 0.012),
+  new THREE.MeshBasicMaterial({ color: 0xd8b34a, side: THREE.DoubleSide })
+));
+
+// ===================================================================
+// Static obstacles (buildings / curbs) — fixed world footprints,
+// rendered as simple props AND as permanently "high" grid cells.
+// ===================================================================
+function sideAt(u) {
+  const tan = roadCurve.getTangentAt(u);
+  return { tan, side: new THREE.Vector3().crossVectors(UP, tan) };
+}
+const staticObstacles = [
+  { u: 0.08, sign: 1, dist: ROAD_WIDTH / 2 + 14, w: 9, d: 9, h: 6, gridR: 7, color: [0.50, 0.42, 0.30] },
+  { u: 0.32, sign: -1, dist: ROAD_WIDTH / 2 + 16, w: 7, d: 16, h: 5, gridR: 8, color: [0.48, 0.40, 0.28] },
+  { u: 0.52, sign: 1, dist: ROAD_WIDTH / 2 + 4, w: 8, d: 2.2, h: 0.6, gridR: 3, color: [0.42, 0.40, 0.36] },
+  { u: 0.78, sign: -1, dist: ROAD_WIDTH / 2 + 5, w: 9, d: 2.2, h: 0.6, gridR: 3, color: [0.42, 0.40, 0.36] },
+  // static poles (lamp posts / road signs) — thin & tall, also labeled "Pole"
+  { u: 0.02, sign: 1, dist: ROAD_WIDTH / 2 + 2.3, w: 0.32, d: 0.32, h: 5.2, gridR: 0.7, color: [0.40, 0.41, 0.43], label: 'Pole' },
+  { u: 0.18, sign: -1, dist: ROAD_WIDTH / 2 + 2.3, w: 0.32, d: 0.32, h: 4.6, gridR: 0.7, color: [0.40, 0.41, 0.43], label: 'Pole' },
+  { u: 0.42, sign: 1, dist: ROAD_WIDTH / 2 + 2.5, w: 0.30, d: 0.30, h: 5.0, gridR: 0.65, color: [0.40, 0.41, 0.43], label: 'Pole' },
+  { u: 0.60, sign: -1, dist: ROAD_WIDTH / 2 + 2.3, w: 0.30, d: 0.30, h: 4.8, gridR: 0.65, color: [0.40, 0.41, 0.43], label: 'Pole' },
+  { u: 0.70, sign: 1, dist: ROAD_WIDTH / 2 + 2.7, w: 0.34, d: 0.34, h: 5.4, gridR: 0.75, color: [0.40, 0.41, 0.43], label: 'Pole' },
+  { u: 0.90, sign: -1, dist: ROAD_WIDTH / 2 + 2.4, w: 0.30, d: 0.30, h: 5.0, gridR: 0.7, color: [0.40, 0.41, 0.43], label: 'Pole' }
+].map((o) => {
+  const { tan, side } = sideAt(o.u);
+  const p = roadCurve.getPointAt(o.u);
+  const cx = p.x + side.x * o.dist * o.sign;
+  const cz = p.z + side.z * o.dist * o.sign;
+  const heading = Math.atan2(tan.x, tan.z);
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(o.w, o.h, o.d),
+    new THREE.MeshStandardMaterial({ color: new THREE.Color(o.color[0], o.color[1], o.color[2]), roughness: 0.9 })
+  );
+  mesh.position.set(cx, p.y + o.h / 2, cz);
+  mesh.rotation.y = heading;
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  scene.add(mesh);
+  return { x: cx, z: cz, groundY: p.y, gridR: o.gridR, color: o.color, label: o.label, height: o.h };
+});
+
+// poles get an HTML "Pole" label, same visual language as tracked objects
+const poleLabels = staticObstacles.filter(o => o.label).map((o) => {
+  const label = document.createElement('div');
+  label.className = 'obj-label';
+  label.innerHTML = `<span class="dot"></span>${o.label}`;
+  document.getElementById('labels').appendChild(label);
+  return { x: o.x, z: o.z, topY: o.groundY + o.height, labelEl: label, labelDot: label.querySelector('.dot') };
+});
+
+// ===================================================================
+// Terrain test cases — potholes (negative elevation), a speed bump
+// (positive ridge), and a rough off-road patch, all reflected purely
+// as grid-cell elevation/color (the physical road mesh stays smooth).
+// ===================================================================
+const potholes = [
+  { u: 0.15, lane: LEFT_LANE_X, radius: 0.9 },
+  { u: 0.46, lane: RIGHT_LANE_X, radius: 1.0 },
+  { u: 0.86, lane: LEFT_LANE_X, radius: 0.8 }
+].map((o) => {
+  const p = roadCurve.getPointAt(o.u);
+  const tan = roadCurve.getTangentAt(o.u);
+  const side = new THREE.Vector3().crossVectors(UP, tan);
+  return {
+    x: p.x + side.x * o.lane, z: p.z + side.z * o.lane,
+    radius: o.radius, elevation: -0.35, color: [0.08, 0.10, 0.15]
+  };
+});
+
+const SPEED_BUMP = (() => {
+  const u = 0.38;
+  const p = roadCurve.getPointAt(u);
+  const tan = roadCurve.getTangentAt(u);
+  return {
+    x: p.x, z: p.z, sh: tan.x, ch: tan.z,
+    halfLength: 1.1, halfWidth: ROAD_WIDTH / 2 + 0.3,
+    elevation: 0.45, color: [0.60, 0.52, 0.35]
+  };
+})();
+
+const ROUGH_PATCH = (() => {
+  const u = 0.53;
+  const p = roadCurve.getPointAt(u);
+  const tan = roadCurve.getTangentAt(u);
+  const side = new THREE.Vector3().crossVectors(UP, tan);
+  const dist = ROAD_WIDTH / 2 + 9;
+  return { x: p.x + side.x * dist, z: p.z + side.z * dist, radius: 9 };
+})();
+
+// ===================================================================
+// Simple low-poly car / pedestrian builders
+// ===================================================================
+function buildCar(bodyColor) {
+  const group = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(1.9, 0.62, 4.2),
+    new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.45, metalness: 0.35 })
+  );
+  body.position.y = 0.62; body.castShadow = true;
+  group.add(body);
+
+  const cabin = new THREE.Mesh(
+    new THREE.SphereGeometry(0.72, 16, 10, 0, Math.PI * 2, 0, 1.5),
+    new THREE.MeshStandardMaterial({ color: 0x2a2e33, roughness: 0.3, metalness: 0.2 })
+  );
+  cabin.scale.set(1.15, 0.85, 1.55);
+  cabin.position.set(0, 0.95, -0.25);
+  cabin.castShadow = true;
+  group.add(cabin);
+
+  const wheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.32, 16);
+  wheelGeo.rotateZ(Math.PI / 2);
+  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x1c1c1e, roughness: 0.85 });
+  const wheels = [];
+  const wx = 1.02, wz = 1.35, wy = 0.36;
+  [[wx, wz], [-wx, wz], [wx, -wz], [-wx, -wz]].forEach(([x, z]) => {
+    const w = new THREE.Mesh(wheelGeo, wheelMat);
+    w.position.set(x, wy, z); w.castShadow = true;
+    group.add(w); wheels.push(w);
+  });
+  return { group, wheels };
+}
+function buildPedestrian() {
+  const group = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.18, 0.22, 1.1, 8),
+    new THREE.MeshStandardMaterial({ color: 0x3a4552, roughness: 0.7 })
+  );
+  body.position.y = 0.75; body.castShadow = true;
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.16, 10, 8),
+    new THREE.MeshStandardMaterial({ color: 0xd8b48f, roughness: 0.6 })
+  );
+  head.position.y = 1.42; head.castShadow = true;
+  group.add(body, head);
+  return group;
+}
+function buildBoundingBox(width, height, length) {
+  const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(width, height, length));
+  const mat = new THREE.LineBasicMaterial({ color: 0x2f8f86, transparent: true, opacity: 0.9 });
+  const lines = new THREE.LineSegments(edges, mat);
+  lines.position.y = height / 2;
+  return lines;
+}
+
+// Orients a group so local +Z follows `tangent` (including any slope) and
+// local +Y follows the true "up" perpendicular to it — gives cars a natural
+// pitch on inclines instead of always staying perfectly level. `extraYaw`
+// (radians) is applied on top, around the object's own local vertical axis.
+function orientAlongTangent(group, tangent, extraYaw) {
+  const forward = tangent.clone().normalize();
+  const right = new THREE.Vector3().crossVectors(UP, forward).normalize();
+  const trueUp = new THREE.Vector3().crossVectors(forward, right).normalize();
+  const m = new THREE.Matrix4().makeBasis(right, trueUp, forward);
+  const q = new THREE.Quaternion().setFromRotationMatrix(m);
+  if (extraYaw) q.multiply(new THREE.Quaternion().setFromAxisAngle(UP, extraYaw));
+  group.quaternion.copy(q);
+}
+
+// ===================================================================
+// Ego car
+// ===================================================================
+const player = buildCar(0xe9eaea);
+scene.add(player.group);
+
+// ===================================================================
+// Color ramps (0..1 float triples, muted / desaturated)
+// ===================================================================
+function lerp(a, b, t) { return a + (b - a) * t; }
+function mixStops(stops, t) {
+  t = Math.max(0, Math.min(1, t));
+  for (let i = 0; i < stops.length - 1; i++) {
+    const s0 = stops[i], s1 = stops[i + 1];
+    if (t >= s0.t && t <= s1.t) {
+      const f = (t - s0.t) / (s1.t - s0.t || 1e-6);
+      return [lerp(s0.c[0], s1.c[0], f), lerp(s0.c[1], s1.c[1], f), lerp(s0.c[2], s1.c[2], f)];
+    }
+  }
+  return stops[stops.length - 1].c;
+}
+const PROX_STOPS = [
+  { t: 0.0, c: [0.30, 0.52, 0.36] },
+  { t: 0.55, c: [0.62, 0.55, 0.28] },
+  { t: 1.0, c: [0.64, 0.30, 0.26] }
+];
+function proximityColor(p) { return mixStops(PROX_STOPS, p); }
+function proximityCss(p) { const c = proximityColor(p); return `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`; }
+
+const ROAD_CELL_COLOR = [0.16, 0.20, 0.28];
+const OFFROAD_CELL_COLOR = [0.24, 0.33, 0.27];
+function smoothNoise(x, y) {
+  return Math.sin(x * 1.3 + 1.7) * Math.cos(y * 1.1 - 0.6) + Math.sin((x + y) * 0.6 + 3.1) * 0.5;
+}
+
+// ===================================================================
+// Dynamic objects — pedestrians (fixed crossing point) + traffic cars
+// (accumulate real arc-length distance so lane/overtake logic works)
+// ===================================================================
+const SENSOR_RANGE = 22;
+
+function wrappedForwardDist(objDist, egoDist) {
+  let d = (objDist - egoDist) % totalLength;
+  if (d < 0) d += totalLength;
+  if (d > totalLength / 2) d -= totalLength;
+  return d;
+}
+
+function randRange(min, max) { return min + Math.random() * (max - min); }
+const RESPAWN_BEHIND_DISTANCE = -18;
+const RESPAWN_AHEAD_MIN = 45, RESPAWN_AHEAD_MAX = 95;
+
+// car-to-car (and car-to-ego) collision avoidance / following distance
+const TRAFFIC_SAFE_GAP = 13, TRAFFIC_STOP_GAP = 5.5;
+const TRAFFIC_ACCEL = 3.2, TRAFFIC_DECEL = 5.5;
+
+const trafficObjects = [
+  // scripted objects — guaranteed to demonstrate stop-for-pedestrian / overtake-slow-car
+  { kind: 'pedestrian', u0: 0.22, amp: ROAD_WIDTH * 0.95, period: 11, phase: 0.0, a: 0.55, b: 0.55, color: 0xd8b48f },
+  { kind: 'pedestrian', u0: 0.63, amp: ROAD_WIDTH * 0.95, period: 13, phase: 0.4, a: 0.55, b: 0.55, color: 0xd8b48f },
+  { kind: 'car', laneOffset: LEFT_LANE_X, speed: 6, distance: 40, a: 2.3, b: 1.05, color: 0x9a5a46 },
+  { kind: 'car', laneOffset: RIGHT_LANE_X, speed: 13, distance: 120, a: 2.3, b: 1.05, color: 0x3d5a80 },
+  { kind: 'car', laneOffset: RIGHT_LANE_X, speed: 11.5, distance: 260, a: 2.3, b: 1.05, color: 0x556b52 },
+  { kind: 'car', laneOffset: RIGHT_LANE_X, speed: 14, distance: 20, a: 2.3, b: 1.05, color: 0x6d5a80 },
+  // ambient objects — respawn ahead of the ego once they fall behind, to keep the
+  // scene continuously populated with traffic/pedestrians without an unbounded pool
+  { kind: 'car', respawn: true, laneOffset: RIGHT_LANE_X, speed: randRange(9, 14), distance: 70, a: 2.3, b: 1.05, color: 0x7a6a52 },
+  { kind: 'car', respawn: true, laneOffset: Math.random() < 0.5 ? LEFT_LANE_X : RIGHT_LANE_X, speed: randRange(7, 13), distance: 170, a: 2.3, b: 1.05, color: 0x4f6a6d },
+  { kind: 'pedestrian', respawn: true, u0: 0.10, amp: ROAD_WIDTH * 0.95, period: randRange(9, 14), phase: Math.random(), a: 0.55, b: 0.55, color: 0xd8b48f },
+  { kind: 'pedestrian', respawn: true, u0: 0.48, amp: ROAD_WIDTH * 0.95, period: randRange(9, 14), phase: Math.random(), a: 0.55, b: 0.55, color: 0xd8b48f }
+].map((o, i) => {
+  const obj = Object.assign({ id: i, x: 0, z: 0, heading: 0, lateral: 0 }, o);
+  if (o.kind === 'car') {
+    obj.currentSpeed = o.speed;
+    const built = buildCar(o.color);
+    obj.model = built.group;
+    obj.box = buildBoundingBox(2.2, 1.7, 4.6);
+    obj.model.add(obj.box);
+    obj.labelText = 'Car';
+    scene.add(obj.model);
+  } else {
+    obj.model = buildPedestrian();
+    obj.box = buildBoundingBox(0.7, 1.6, 0.7);
+    obj.model.add(obj.box);
+    obj.labelText = 'Pedestrian';
+    scene.add(obj.model);
+  }
+  const label = document.createElement('div');
+  label.className = 'obj-label';
+  label.innerHTML = `<span class="dot"></span>${obj.labelText}`;
+  document.getElementById('labels').appendChild(label);
+  obj.labelEl = label;
+  obj.labelDot = label.querySelector('.dot');
+  return obj;
+});
+
+// Target speed for a traffic car so it slows/stops behind whatever is
+// nearest ahead of it in the same lane — the ego car included — instead
+// of clipping through. Returns the car's own free-flow speed when clear.
+function computeFollowingSpeed(car) {
+  let nearestGap = Infinity, nearestSpeed = Infinity;
+  const consider = (dist, lane, speed) => {
+    if (Math.abs(lane - car.laneOffset) > LANE_HALF_WIDTH) return;
+    const gap = wrappedForwardDist(dist, car.distance);
+    if (gap > 0.1 && gap < nearestGap) { nearestGap = gap; nearestSpeed = speed; }
+  };
+  consider(egoDistance, egoLaneOffset, egoSpeed);
+  for (const other of trafficObjects) {
+    if (other === car || other.kind !== 'car') continue;
+    consider(other.distance, other.laneOffset, other.currentSpeed);
+  }
+  if (nearestGap === Infinity) return car.speed;
+  if (nearestGap <= TRAFFIC_STOP_GAP) return 0;
+  if (nearestGap >= TRAFFIC_SAFE_GAP) return car.speed;
+  const t = (nearestGap - TRAFFIC_STOP_GAP) / (TRAFFIC_SAFE_GAP - TRAFFIC_STOP_GAP);
+  return Math.min(car.speed, nearestSpeed) * t;
+}
+
+function updateTrafficObjects(dt) {
+  for (const o of trafficObjects) {
+    if (o.respawn && o.virtualDistance !== undefined &&
+        wrappedForwardDist(o.virtualDistance, egoDistance) < RESPAWN_BEHIND_DISTANCE) {
+      const ahead = randRange(RESPAWN_AHEAD_MIN, RESPAWN_AHEAD_MAX);
+      if (o.kind === 'car') {
+        o.distance = egoDistance + ahead;
+        o.speed = randRange(7, 14);
+        o.currentSpeed = o.speed;
+        o.laneOffset = Math.random() < 0.5 ? LEFT_LANE_X : RIGHT_LANE_X;
+      } else {
+        o.u0 = ((egoDistance + ahead) / totalLength) % 1;
+        o.period = randRange(9, 14);
+        o.phase = Math.random();
+      }
+    }
+
+    if (o.kind === 'car') {
+      const targetSpeed = computeFollowingSpeed(o);
+      const delta = targetSpeed - o.currentSpeed;
+      const maxStep = (delta > 0 ? TRAFFIC_ACCEL : TRAFFIC_DECEL) * dt;
+      o.currentSpeed += Math.abs(delta) < maxStep ? delta : Math.sign(delta) * maxStep;
+      o.currentSpeed = Math.max(0, o.currentSpeed);
+      o.distance += o.currentSpeed * dt;
+
+      const u = (o.distance / totalLength) % 1;
+      const p = roadCurve.getPointAt(u);
+      const tan = roadCurve.getTangentAt(u);
+      const side = new THREE.Vector3().crossVectors(UP, tan);
+      o.x = p.x + side.x * o.laneOffset;
+      o.z = p.z + side.z * o.laneOffset;
+      o.lateral = o.laneOffset;
+      o.heading = Math.atan2(tan.x, tan.z);
+      o.virtualDistance = o.distance;
+      o.groundY = p.y;
+      o.model.position.set(o.x, p.y, o.z);
+      orientAlongTangent(o.model, tan, 0);
+    } else {
+      const phaseVal = simElapsed / o.period + o.phase;
+      const lateral = Math.sin(phaseVal * Math.PI * 2) * (o.amp / 2);
+      const vel = Math.cos(phaseVal * Math.PI * 2);
+      const p = roadCurve.getPointAt(o.u0);
+      const tan = roadCurve.getTangentAt(o.u0);
+      const side = new THREE.Vector3().crossVectors(UP, tan);
+      o.x = p.x + side.x * lateral;
+      o.z = p.z + side.z * lateral;
+      o.lateral = lateral;
+      o.heading = Math.atan2(tan.x, tan.z) + (vel >= 0 ? Math.PI / 2 : -Math.PI / 2);
+      o.virtualDistance = o.u0 * totalLength;
+      o.groundY = p.y;
+      o.model.position.set(o.x, p.y, o.z);
+      o.model.rotation.y = o.heading;
+    }
+  }
+}
+
+// ===================================================================
+// Adaptive-resolution colored grid overlay (rings of flat quads,
+// static topology, per-frame recolored, ego-centric transform)
+// ===================================================================
+const RINGS = [
+  { outer: 3.2, cell: 0.32 },
+  { outer: 6.8, cell: 0.6 },
+  { outer: 11.5, cell: 1.1 },
+  { outer: 16.5, cell: 2.0 },
+  { outer: 22, cell: 3.2 }
+];
+
+function buildGridRing(outer, inner, cell, insetFactor) {
+  const positions = [], colors = [], indices = [];
+  const cellList = [];
+  let vIdx = 0;
+  const start = -outer - (outer % cell);
+  for (let lx = start; lx < outer; lx += cell) {
+    for (let ly = start; ly < outer; ly += cell) {
+      const midx = lx + cell / 2, midy = ly + cell / 2;
+      const cheb = Math.max(Math.abs(midx), Math.abs(midy));
+      if (cheb <= inner || cheb > outer) continue;
+      const half = (cell * insetFactor) / 2;
+      const corners = [
+        [midx - half, midy - half], [midx + half, midy - half],
+        [midx + half, midy + half], [midx - half, midy + half]
+      ];
+      for (const [cx, cy] of corners) { positions.push(cx, 0, cy); colors.push(0.2, 0.2, 0.2); }
+      indices.push(vIdx, vIdx + 1, vIdx + 2, vIdx, vIdx + 2, vIdx + 3);
+      cellList.push({ midx, midy, base: vIdx * 3 });
+      vIdx += 4;
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  const colorAttr = new THREE.Float32BufferAttribute(new Float32Array(colors), 3);
+  colorAttr.setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute('color', colorAttr);
+  geo.setIndex(indices);
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.5,
+    side: THREE.DoubleSide, depthWrite: false
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  return { mesh, cellList, colorAttr };
+}
+
+const gridGroup = new THREE.Group();
+const gridRings = RINGS.map((r, i) => {
+  const inner = i === 0 ? 0 : RINGS[i - 1].outer - r.cell * 0.75;
+  const ring = buildGridRing(r.outer, inner, r.cell, 0.86);
+  gridGroup.add(ring.mesh);
+  return ring;
+});
+scene.add(gridGroup);
+
+// ===================================================================
+// Cell data inspector — debug overlay showing per-cell X, Y, Z (elevation)
+// text (plus a vertical elevation "stick" in Z modes) across most of the
+// visible grid, off by default and toggled live via the bottom-left
+// "Cell Data" button. Cells outside the camera frustum are skipped for
+// both rendering and per-frame work; density is reduced ring-by-ring so
+// far cells don't overwhelm the screen.
+// ===================================================================
+let cellDataOn = false;
+let cellDataMode = 'xyz';
+const STICK_HEIGHT_SCALE = 3.2;
+
+function subsampleForward(cellList, targetCount) {
+  const forward = cellList.filter(c => c.midy > 0.2);
+  const stride = Math.max(1, Math.floor(forward.length / targetCount));
+  return forward.filter((_, i) => i % stride === 0);
+}
+const CELL_DATA_PER_RING_TARGET = [14, 14, 12, 10, 8];
+const inspectorCells = [];
+gridRings.forEach((ring, i) => {
+  subsampleForward(ring.cellList, CELL_DATA_PER_RING_TARGET[i] || 8).forEach(c => inspectorCells.push(c));
+});
+
+const cellDataLabelsRoot = document.getElementById('cellDataLabels');
+const cellDataLabels = inspectorCells.map(() => {
+  const el = document.createElement('div');
+  el.className = 'cell-data-label';
+  cellDataLabelsRoot.appendChild(el);
+  return el;
+});
+const cellDataSticks = inspectorCells.map(() => {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 1, 0], 3));
+  const mat = new THREE.LineBasicMaterial({ color: 0xdfe7ee, transparent: true, opacity: 0.85 });
+  const line = new THREE.Line(geo, mat);
+  line.visible = false;
+  scene.add(line);
+  return line;
+});
+
+function hideAllCellDataVisuals() {
+  cellDataLabels.forEach(el => { el.style.display = 'none'; });
+  cellDataSticks.forEach(s => { s.visible = false; });
+}
+
+const cellDataToggleBtn = document.getElementById('cellDataToggle');
+const cellDataModesEl = document.getElementById('cellDataModes');
+const cellDataModeBtns = Array.from(cellDataModesEl.querySelectorAll('button'));
+cellDataToggleBtn.addEventListener('click', () => {
+  cellDataOn = !cellDataOn;
+  cellDataToggleBtn.classList.toggle('active', cellDataOn);
+  cellDataModesEl.style.display = cellDataOn ? 'flex' : 'none';
+  if (!cellDataOn) hideAllCellDataVisuals();
+});
+cellDataModeBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    cellDataMode = btn.dataset.mode;
+    cellDataModeBtns.forEach(b => b.classList.toggle('active', b === btn));
+  });
+});
+
+function updateCellDataInspector(carPos, tan) {
+  if (!cellDataOn) return;
+  const showStick = cellDataMode === 'z' || cellDataMode === 'xyz';
+  for (let i = 0; i < inspectorCells.length; i++) {
+    const cell = inspectorCells[i];
+    const el = cellDataLabels[i];
+    const stick = cellDataSticks[i];
+    const wx = carPos.x + cell.midx * tan.z + cell.midy * tan.x;
+    const wz = carPos.z + cell.midx * (-tan.x) + cell.midy * tan.z;
+    const wy = carPos.y;
+    const info = classifyGridCell(wx, wz, cell.midx);
+    const groundV = new THREE.Vector3(wx, wy + 0.15, wz).project(camera);
+    const outside = groundV.z < -1 || groundV.z > 1 ||
+      groundV.x < -1 || groundV.x > 1 || groundV.y < -1 || groundV.y > 1;
+    if (outside) { el.style.display = 'none'; stick.visible = false; continue; }
+
+    const elevated = info.elevation * STICK_HEIGHT_SCALE;
+    if (showStick) {
+      stick.visible = true;
+      stick.position.set(wx, wy, wz);
+      stick.scale.y = elevated || 0.001;
+    } else {
+      stick.visible = false;
+    }
+
+    const labelWorldY = showStick ? wy + elevated + 0.15 * Math.sign(elevated || 1) : wy + 0.15;
+    const v = new THREE.Vector3(wx, labelWorldY, wz).project(camera);
+    el.style.display = 'block';
+    el.style.left = ((v.x * 0.5 + 0.5) * W) + 'px';
+    el.style.top = ((-v.y * 0.5 + 0.5) * H) + 'px';
+    const xs = wx.toFixed(1), ys = wz.toFixed(1), zs = info.elevation.toFixed(2);
+    if (cellDataMode === 'xy') el.innerHTML = `X ${xs}<br>Y ${ys}`;
+    else if (cellDataMode === 'z') el.innerHTML = `Z ${zs}`;
+    else el.innerHTML = `X ${xs}<br>Y ${ys}<br>Z ${zs}`;
+  }
+}
+
+const MAX_OBSTACLE_HEIGHT = 6;
+
+// Returns { color:[r,g,b], elevation:0..1 } for a world-space grid cell.
+// elevation is the raw "height/occupancy" scalar exposed by the cell-data inspector.
+function classifyGridCell(worldX, worldZ, localLateral) {
+  for (const o of trafficObjects) {
+    const dx = worldX - o.x, dz = worldZ - o.z;
+    const ch = Math.cos(o.heading), sh = Math.sin(o.heading);
+    const f = dx * sh + dz * ch; // along object's forward axis (heading measured atan2(x,z))
+    const r = dx * ch - dz * sh; // along object's right axis
+    if ((f * f) / (o.a * o.a) + (r * r) / (o.b * o.b) <= 1) {
+      const color = o.proximity != null ? proximityColor(o.proximity) : PROX_STOPS[0].c;
+      return { color, elevation: o.kind === 'car' ? 0.27 : 0.30 };
+    }
+  }
+  for (const s of staticObstacles) {
+    const dist = Math.hypot(worldX - s.x, worldZ - s.z);
+    if (dist <= s.gridR) return { color: s.color, elevation: Math.min(1, s.height / MAX_OBSTACLE_HEIGHT) };
+  }
+  for (const ph of potholes) {
+    if (Math.hypot(worldX - ph.x, worldZ - ph.z) <= ph.radius) {
+      return { color: ph.color, elevation: ph.elevation };
+    }
+  }
+  {
+    const dx = worldX - SPEED_BUMP.x, dz = worldZ - SPEED_BUMP.z;
+    const f = dx * SPEED_BUMP.sh + dz * SPEED_BUMP.ch; // along road direction
+    const r = dx * SPEED_BUMP.ch - dz * SPEED_BUMP.sh; // across road direction
+    if ((f * f) / (SPEED_BUMP.halfLength * SPEED_BUMP.halfLength) +
+        (r * r) / (SPEED_BUMP.halfWidth * SPEED_BUMP.halfWidth) <= 1) {
+      return { color: SPEED_BUMP.color, elevation: SPEED_BUMP.elevation };
+    }
+  }
+  const onRoad = Math.abs(localLateral) < ROAD_WIDTH / 2;
+  if (onRoad) return { color: ROAD_CELL_COLOR, elevation: 0.05 };
+  const inRough = Math.hypot(worldX - ROUGH_PATCH.x, worldZ - ROUGH_PATCH.z) < ROUGH_PATCH.radius;
+  if (inRough) {
+    const rn = 0.5 + 0.5 * smoothNoise(worldX * 0.35, worldZ * 0.35);
+    return {
+      color: [
+        OFFROAD_CELL_COLOR[0] + rn * 0.12,
+        OFFROAD_CELL_COLOR[1] + rn * 0.08 - 0.02,
+        OFFROAD_CELL_COLOR[2] + rn * 0.05
+      ],
+      elevation: 0.15 + rn * 0.55
+    };
+  }
+  const n = 0.5 + 0.5 * smoothNoise(worldX * 0.05, worldZ * 0.05);
+  return {
+    color: [
+      OFFROAD_CELL_COLOR[0] + n * 0.05,
+      OFFROAD_CELL_COLOR[1] + n * 0.06,
+      OFFROAD_CELL_COLOR[2] + n * 0.04
+    ],
+    elevation: 0.15 + n * 0.15
+  };
+}
+
+function updateGrid(carPos, tan) {
+  gridGroup.position.set(carPos.x, carPos.y + 0.03, carPos.z);
+  orientAlongTangent(gridGroup, tan, 0);
+
+  for (const ring of gridRings) {
+    const arr = ring.colorAttr.array;
+    for (const cell of ring.cellList) {
+      const wx = carPos.x + cell.midx * tan.z + cell.midy * tan.x;
+      const wz = carPos.z + cell.midx * (-tan.x) + cell.midy * tan.z;
+      const c = classifyGridCell(wx, wz, cell.midx).color;
+      const base = cell.base;
+      for (let v = 0; v < 4; v++) {
+        arr[base + v * 3] = c[0]; arr[base + v * 3 + 1] = c[1]; arr[base + v * 3 + 2] = c[2];
+      }
+    }
+    ring.colorAttr.needsUpdate = true;
+  }
+}
+
+// ===================================================================
+// Predicted path ribbon (vivid high-visibility line ahead of the car)
+// ===================================================================
+const PATH_COLOR = 0xff7a1f; // vivid orange — reads clearly against the blue-gray grid & gray road
+const pathGlowMat = new THREE.MeshBasicMaterial({ color: PATH_COLOR, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false });
+const pathMat = new THREE.MeshBasicMaterial({ color: PATH_COLOR, transparent: true, opacity: 0.92, side: THREE.DoubleSide, depthWrite: false });
+let pathGlowMesh = new THREE.Mesh(new THREE.BufferGeometry(), pathGlowMat);
+let pathMesh = new THREE.Mesh(new THREE.BufferGeometry(), pathMat);
+scene.add(pathGlowMesh);
+scene.add(pathMesh);
+
+function updatePredictedPath(egoU, laneOffset) {
+  const AHEAD = 34, SAMPLES = 24;
+  const pts = [], glowPts = [], tans = [];
+  for (let i = 0; i <= SAMPLES; i++) {
+    const dist = (i / SAMPLES) * AHEAD;
+    const u = ((egoU * totalLength + dist) / totalLength) % 1;
+    const p = roadCurve.getPointAt(u);
+    const tan = roadCurve.getTangentAt(u);
+    const side = new THREE.Vector3().crossVectors(UP, tan);
+    pts.push(new THREE.Vector3(p.x + side.x * laneOffset, p.y + 0.065, p.z + side.z * laneOffset));
+    glowPts.push(new THREE.Vector3(p.x + side.x * laneOffset, p.y + 0.05, p.z + side.z * laneOffset));
+    tans.push(tan);
+  }
+  const newGeo = buildRibbon(pts, tans, () => 1.35, 0, false);
+  pathMesh.geometry.dispose();
+  pathMesh.geometry = newGeo;
+
+  const newGlowGeo = buildRibbon(glowPts, tans, () => 2.7, 0, false);
+  pathGlowMesh.geometry.dispose();
+  pathGlowMesh.geometry = newGlowGeo;
+}
+
+// ===================================================================
+// Camera rig
+// ===================================================================
+const CHASE_BACK = 7.2, CHASE_HEIGHT = 3.4, LOOK_AHEAD = 18, LOOK_HEIGHT = 1.1;
+const camPos = new THREE.Vector3();
+const lookTarget = new THREE.Vector3();
+let firstFrame = true;
+
+// ===================================================================
+// Ego driving state machine
+// ===================================================================
+const CRUISE_SPEED = 11;
+const ACCEL = 4, DECEL = 5.5;
+const PEDESTRIAN_STOP_DISTANCE = 20;   // wide zone — starts braking early/smoothly
+const PEDESTRIAN_BLOCK_DISTANCE = 8;   // tight zone — must be clear of this to resume
+const PED_CLEAR_DEBOUNCE = 0.4;
+const MAX_STOP_DURATION = 9;           // safeguard: never feels frozen, even with overlapping crossings
+const OVERTAKE_TRIGGER_DISTANCE = 26;
+const OVERTAKE_CLEAR_DISTANCE = -9;
+
+let egoDistance = 0;
+let egoSpeed = CRUISE_SPEED;
+let egoLaneOffset = LEFT_LANE_X;
+let egoTargetLaneOffset = LEFT_LANE_X;
+let egoMotionState = 'cruise'; // cruise | braking | stopped | resuming
+let overtaking = false;
+let overtakeTargetId = null;
+let simElapsed = 0;
+let stoppedTimer = 0;
+
+const speedEl = document.getElementById('speedValue');
+const objCountEl = document.getElementById('objCount');
+const statusTextEl = document.getElementById('statusText');
+const statusDotEl = document.getElementById('statusDot');
+
+function statusLabel() {
+  if (egoMotionState === 'braking') return 'Autopilot — Braking for pedestrian';
+  if (egoMotionState === 'stopped') return 'Autopilot — Waiting for pedestrian';
+  if (overtaking) return 'Autopilot — Overtaking';
+  if (egoMotionState === 'resuming') return 'Autopilot — Resuming';
+  return 'Autopilot — Cruising';
+}
+
+// ===================================================================
+// Main loop
+// ===================================================================
+let lastTime = performance.now();
+let hudTimer = 0;
+let pedClearAccum = 0;
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+  simElapsed += dt;
+
+  updateTrafficObjects(dt);
+
+  // -------- hazard detection (pedestrian in ego lane ahead) --------
+  // Two zones: a wide one to start braking smoothly and early, and a tight
+  // "blocking" zone that alone determines whether the car must stay stopped.
+  // This is what lets the car resume as soon as the path directly ahead is
+  // clear, instead of waiting on every pedestrian anywhere in the wide zone
+  // (which is what caused long stalls when multiple crossings overlapped).
+  let hazardBraking = false, hazardBlocking = false;
+  for (const o of trafficObjects) {
+    if (o.kind !== 'pedestrian') continue;
+    const fd = wrappedForwardDist(o.virtualDistance, egoDistance);
+    const inLane = Math.abs(o.lateral - egoTargetLaneOffset) < LANE_HALF_WIDTH;
+    if (inLane && fd > 0 && fd < PEDESTRIAN_STOP_DISTANCE) hazardBraking = true;
+    if (inLane && fd > 0 && fd < PEDESTRIAN_BLOCK_DISTANCE) hazardBlocking = true;
+  }
+
+  // Low-speed watchdog: accumulates whenever the car isn't actually making
+  // progress, independent of which exact sub-state it's in. This is what
+  // guarantees it never feels frozen even if separate pedestrians re-trigger
+  // the hazard in quick succession (each one individually resolves fast,
+  // but back-to-back they could otherwise stall the car indefinitely).
+  if (egoSpeed > CRUISE_SPEED * 0.5) stoppedTimer = 0;
+  else stoppedTimer += dt;
+  const forceResume = stoppedTimer > MAX_STOP_DURATION;
+
+  if (egoMotionState === 'stopped') {
+    if (hazardBlocking && !forceResume) {
+      pedClearAccum = 0;
+    } else {
+      pedClearAccum += dt;
+      if (pedClearAccum > PED_CLEAR_DEBOUNCE) egoMotionState = 'resuming';
+    }
+  } else if (hazardBraking && !forceResume) {
+    pedClearAccum = 0;
+    egoMotionState = (egoSpeed < 0.3) ? 'stopped' : 'braking';
+  } else if (egoMotionState === 'braking') {
+    pedClearAccum += dt;
+    if (pedClearAccum > PED_CLEAR_DEBOUNCE) egoMotionState = 'resuming';
+  } else if (egoMotionState === 'resuming') {
+    if (egoSpeed > CRUISE_SPEED * 0.98) egoMotionState = 'cruise';
+  } else {
+    egoMotionState = 'cruise';
+  }
+  const braking = egoMotionState === 'braking' || egoMotionState === 'stopped';
+
+  // -------- overtake logic (slow car ahead in ego's own lane) --------
+  if (!braking) {
+    if (!overtaking) {
+      let nearest = null, nearestDist = Infinity;
+      for (const o of trafficObjects) {
+        if (o.kind !== 'car') continue;
+        const fd = wrappedForwardDist(o.virtualDistance, egoDistance);
+        const inLane = Math.abs(o.lateral - LEFT_LANE_X) < LANE_HALF_WIDTH;
+        if (inLane && fd > 0 && fd < OVERTAKE_TRIGGER_DISTANCE && o.speed < CRUISE_SPEED * 0.85) {
+          if (fd < nearestDist) { nearestDist = fd; nearest = o; }
+        }
+      }
+      if (nearest) { overtaking = true; overtakeTargetId = nearest.id; egoTargetLaneOffset = RIGHT_LANE_X; }
+    } else {
+      const target = trafficObjects.find(o => o.id === overtakeTargetId);
+      const fd = target ? wrappedForwardDist(target.virtualDistance, egoDistance) : -Infinity;
+      if (!target || fd < OVERTAKE_CLEAR_DISTANCE) {
+        overtaking = false; overtakeTargetId = null; egoTargetLaneOffset = LEFT_LANE_X;
+      }
+    }
+  }
+
+  const egoTargetSpeed = braking ? 0 : CRUISE_SPEED;
+  const speedDelta = egoTargetSpeed - egoSpeed;
+  const maxStep = (speedDelta > 0 ? ACCEL : DECEL) * dt;
+  egoSpeed += Math.abs(speedDelta) < maxStep ? speedDelta : Math.sign(speedDelta) * maxStep;
+  egoSpeed = Math.max(0, egoSpeed);
+  egoDistance += egoSpeed * dt;
+
+  const laneSmooth = 1 - Math.pow(0.001, dt);
+  const prevLaneOffset = egoLaneOffset;
+  egoLaneOffset += (egoTargetLaneOffset - egoLaneOffset) * laneSmooth;
+  const lateralVel = (egoLaneOffset - prevLaneOffset) / dt;
+
+  const egoU = (egoDistance / totalLength) % 1;
+  const roadPos = roadCurve.getPointAt(egoU);
+  const tan = roadCurve.getTangentAt(egoU);
+  const side = new THREE.Vector3().crossVectors(UP, tan);
+  const carWorldPos = new THREE.Vector3(
+    roadPos.x + side.x * egoLaneOffset, roadPos.y, roadPos.z + side.z * egoLaneOffset
+  );
+  const steerYaw = Math.atan2(lateralVel, Math.max(egoSpeed, 0.6)) * 0.6;
+
+  player.group.position.copy(carWorldPos);
+  orientAlongTangent(player.group, tan, steerYaw);
+  const wheelSpin = dt * egoSpeed / 0.36;
+  player.wheels.forEach(w => { w.rotation.x += wheelSpin; });
+
+  // -------- proximity for every tracked object (used by grid + boxes + labels) --------
+  let tracked = 0;
+  for (const o of trafficObjects) {
+    const dist = Math.hypot(o.x - carWorldPos.x, o.z - carWorldPos.z);
+    o.proximity = 1 - Math.max(0, Math.min(1, dist / SENSOR_RANGE));
+    if (dist < SENSOR_RANGE) tracked++;
+    const cssColor = proximityCss(o.proximity);
+    o.box.material.color.set(cssColor);
+    o.labelDot.style.background = cssColor;
+
+    const labelPos = new THREE.Vector3(o.x, (o.groundY || 0) + (o.kind === 'car' ? 2.0 : 1.75), o.z);
+    const v = labelPos.project(camera);
+    if (v.z > 1 || dist > SENSOR_RANGE * 1.6) {
+      o.labelEl.style.display = 'none';
+    } else {
+      o.labelEl.style.display = 'flex';
+      o.labelEl.style.left = ((v.x * 0.5 + 0.5) * W) + 'px';
+      o.labelEl.style.top = ((-v.y * 0.5 + 0.5) * H) + 'px';
+    }
+  }
+
+  // -------- grid + predicted path --------
+  updateGrid(carWorldPos, tan);
+  updatePredictedPath(egoU, egoLaneOffset);
+  updateCellDataInspector(carWorldPos, tan);
+
+  // -------- static pole labels --------
+  for (const o of poleLabels) {
+    const dist = Math.hypot(o.x - carWorldPos.x, o.z - carWorldPos.z);
+    const proximity = 1 - Math.max(0, Math.min(1, dist / SENSOR_RANGE));
+    o.labelDot.style.background = proximityCss(proximity);
+    const v = new THREE.Vector3(o.x, o.topY + 0.3, o.z).project(camera);
+    if (v.z > 1 || dist > SENSOR_RANGE * 1.6) {
+      o.labelEl.style.display = 'none';
+    } else {
+      o.labelEl.style.display = 'flex';
+      o.labelEl.style.left = ((v.x * 0.5 + 0.5) * W) + 'px';
+      o.labelEl.style.top = ((-v.y * 0.5 + 0.5) * H) + 'px';
+    }
+  }
+
+  // -------- camera --------
+  const back = tan.clone().multiplyScalar(-CHASE_BACK);
+  camPos.set(carWorldPos.x + back.x, carWorldPos.y + CHASE_HEIGHT, carWorldPos.z + back.z);
+  if (firstFrame) { camera.position.copy(camPos); firstFrame = false; }
+  else { camera.position.lerp(camPos, 1 - Math.pow(0.001, dt)); }
+  const ahead = tan.clone().multiplyScalar(LOOK_AHEAD);
+  lookTarget.set(carWorldPos.x + ahead.x, carWorldPos.y + LOOK_HEIGHT, carWorldPos.z + ahead.z);
+  camera.lookAt(lookTarget);
+
+  // -------- HUD --------
+  hudTimer += dt;
+  if (hudTimer > 0.12) {
+    hudTimer = 0;
+    speedEl.textContent = Math.round(egoSpeed * 3.6);
+    objCountEl.textContent = tracked;
+    statusTextEl.textContent = statusLabel();
+    statusDotEl.style.background = braking ? '#c0704f' : (overtaking ? '#c9a23f' : '#4f9d63');
+  }
+
+  renderer.render(scene, camera);
+}
+
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
